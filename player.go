@@ -8,13 +8,13 @@ package main
 #include <SDL_ttf.h>
 #cgo pkg-config: libavformat libavcodec libavutil libswscale sdl2 SDL2_ttf
 
-Uint32 get_event_type(SDL_Event ev) {
+static inline Uint32 get_event_type(SDL_Event ev) {
 	return ev.type;
 }
-SDL_KeyboardEvent get_event_key(SDL_Event ev) {
+static inline SDL_KeyboardEvent get_event_key(SDL_Event ev) {
 	return ev.key;
 }
-int get_userevent_code(SDL_Event ev) {
+static inline int get_userevent_code(SDL_Event ev) {
 	return ev.user.code;
 }
 
@@ -38,16 +38,37 @@ int add_ticker(int interval) {
 	return code;
 }
 
+static inline void audio_callback(void *userdata, Uint8 *stream, int len) {
+	provideAudio(userdata, stream, len);
+}
+void setup_audio_callback(SDL_AudioSpec *spec, void *bufferp) {
+	spec->callback = audio_callback;
+	spec->userdata = bufferp;
+}
+
 */
 import "C"
 import (
+	"bytes"
 	"fmt"
 	"log"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"reflect"
 	"runtime"
+	"sync"
 	"unsafe"
 )
+
+type AudioBuf struct {
+	*bytes.Buffer
+	sync.Mutex
+}
+
+func init() {
+	go http.ListenAndServe(":55559", nil)
+}
 
 func main() {
 	runtime.GOMAXPROCS(32)
@@ -74,24 +95,40 @@ func main() {
 	header.Data = uintptr(unsafe.Pointer(formatCtx.streams))
 
 	videoIndex := C.int(-1)
+	audioIndex := C.int(-1)
 	for i, stream := range streams {
-		if stream.codec.codec_type == C.AVMEDIA_TYPE_VIDEO {
+		if stream.codec.codec_type == C.AVMEDIA_TYPE_VIDEO && videoIndex == -1 {
 			videoIndex = C.int(i)
-			break
+		} else if stream.codec.codec_type == C.AVMEDIA_TYPE_AUDIO && audioIndex == -1 {
+			audioIndex = C.int(i)
 		}
 	}
-	if videoIndex < 0 {
+	if videoIndex == -1 {
 		log.Fatal("no video stream")
 	}
+	if audioIndex == -1 {
+		log.Fatal("no audio stream")
+	}
 
-	codecCtx := streams[videoIndex].codec
-	defer C.avcodec_close(codecCtx)
-	codec := C.avcodec_find_decoder(codecCtx.codec_id)
+	// video codec
+	vCodecCtx := streams[videoIndex].codec
+	defer C.avcodec_close(vCodecCtx)
+	codec := C.avcodec_find_decoder(vCodecCtx.codec_id)
 	if codec == nil {
 		log.Fatal("codec not found")
 	}
 	var options *C.AVDictionary
-	if C.avcodec_open2(codecCtx, codec, &options) < 0 {
+	if C.avcodec_open2(vCodecCtx, codec, &options) < 0 {
+		log.Fatal("open codec error")
+	}
+
+	// audio codec
+	aCodecCtx := streams[audioIndex].codec
+	aCodec := C.avcodec_find_decoder(aCodecCtx.codec_id)
+	if aCodec == nil {
+		log.Fatal("audio codec not found")
+	}
+	if C.avcodec_open2(aCodecCtx, aCodec, &options) < 0 {
 		log.Fatal("open codec error")
 	}
 
@@ -99,7 +136,7 @@ func main() {
 	C.SDL_Init(C.SDL_INIT_AUDIO | C.SDL_INIT_VIDEO | C.SDL_INIT_TIMER)
 	defer C.SDL_Quit()
 	runtime.LockOSThread()
-	window := C.SDL_CreateWindow(C.CString("play"), 0, 0, codecCtx.width, codecCtx.height,
+	window := C.SDL_CreateWindow(C.CString("play"), 0, 0, vCodecCtx.width, vCodecCtx.height,
 		C.SDL_WINDOW_BORDERLESS|C.SDL_WINDOW_RESIZABLE|C.SDL_WINDOW_MAXIMIZED)
 	if window == nil {
 		fatalSDLError()
@@ -114,7 +151,7 @@ func main() {
 	texture := C.SDL_CreateTexture(renderer,
 		C.SDL_PIXELFORMAT_YV12,
 		C.SDL_TEXTUREACCESS_STREAMING,
-		codecCtx.width, codecCtx.height)
+		vCodecCtx.width, vCodecCtx.height)
 	if texture == nil {
 		fatalSDLError()
 	}
@@ -131,24 +168,40 @@ func main() {
 	}
 	defer C.TTF_CloseFont(font)
 
+	// sdl audio
+	var wantedSpec, spec C.SDL_AudioSpec
+	wantedSpec.freq = aCodecCtx.sample_rate
+	wantedSpec.format = C.AUDIO_F32SYS
+	wantedSpec.channels = C.Uint8(aCodecCtx.channels)
+	wantedSpec.samples = 4096
+	audioBuf := &AudioBuf{Buffer: new(bytes.Buffer)}
+	C.setup_audio_callback(&wantedSpec, unsafe.Pointer(audioBuf))
+	dev := C.SDL_OpenAudioDevice(nil, 0, &wantedSpec, &spec, C.SDL_AUDIO_ALLOW_ANY_CHANGE)
+	if dev == 0 {
+		fatalSDLError()
+	}
+	defer C.SDL_CloseAudioDevice(dev)
+	C.SDL_PauseAudioDevice(dev, 0)
+	fmt.Printf("want %v\nhas %v\n", wantedSpec, spec)
+
 	running := true
 
 	// decoder
 	poolSize := 16
 	framePool := make(chan *C.AVFrame, poolSize)
 	frames := make(chan *C.AVFrame, poolSize)
-	numBytes := C.size_t(C.avpicture_get_size(C.PIX_FMT_YUV420P, codecCtx.width, codecCtx.height))
+	numBytes := C.size_t(C.avpicture_get_size(C.PIX_FMT_YUV420P, vCodecCtx.width, vCodecCtx.height))
 	for i := 0; i < poolSize; i++ {
 		frame := C.av_frame_alloc()
 		buffer := (*C.uint8_t)(unsafe.Pointer(C.av_malloc(numBytes)))
 		C.avpicture_fill((*C.AVPicture)(unsafe.Pointer(frame)), buffer, C.PIX_FMT_YUV420P,
-			codecCtx.width, codecCtx.height)
+			vCodecCtx.width, vCodecCtx.height)
 		framePool <- frame
 	}
 	go func() {
 		runtime.LockOSThread()
-		swsCtx := C.sws_getContext(codecCtx.width, codecCtx.height, codecCtx.pix_fmt,
-			codecCtx.width, codecCtx.height,
+		swsCtx := C.sws_getContext(vCodecCtx.width, vCodecCtx.height, vCodecCtx.pix_fmt,
+			vCodecCtx.width, vCodecCtx.height,
 			C.PIX_FMT_YUV420P, C.SWS_BILINEAR,
 			nil, nil, nil)
 		if swsCtx == nil {
@@ -157,24 +210,39 @@ func main() {
 		var packet C.AVPacket
 		var frameFinished C.int
 		frame := C.av_frame_alloc()
+		aFrame := C.av_frame_alloc()
 		for C.av_read_frame(formatCtx, &packet) >= 0 && running {
-			if packet.stream_index != videoIndex {
-				C.av_free_packet(&packet)
-				continue
+			// video packet
+			if packet.stream_index == videoIndex {
+				if C.avcodec_decode_video2(vCodecCtx, frame, &frameFinished, &packet) < C.int(0) {
+					log.Fatal("video decode error")
+				}
+				if frameFinished > 0 {
+					vframe := <-framePool
+					C.sws_scale(swsCtx,
+						&frame.data[0], &frame.linesize[0], 0, vCodecCtx.height,
+						&vframe.data[0], &vframe.linesize[0])
+					frames <- vframe
+				}
+				// audio packet
+			} else if packet.stream_index == audioIndex {
+				l := C.avcodec_decode_audio4(aCodecCtx, aFrame, &frameFinished, &packet)
+				if l < 0 {
+					log.Fatal("audio decode error")
+				}
+				if l != packet.size { //TODO
+					log.Fatal("FIXME: multiple frame packet")
+				}
+				if frameFinished > 0 {
+					dataSize := C.av_samples_get_buffer_size(nil, aCodecCtx.channels, aFrame.nb_samples,
+						int32(aFrame.format), 1)
+					//fmt.Printf("data size %d, %d frames, %d channels\n", dataSize, aFrame.nb_samples, aCodecCtx.channels)
+					//TODO resample
+					audioBuf.Lock()
+					audioBuf.Write(C.GoBytes(unsafe.Pointer(aFrame.data[0]), dataSize))
+					audioBuf.Unlock()
+				}
 			}
-			if C.avcodec_decode_video2(codecCtx, frame, &frameFinished, &packet) < C.int(0) {
-				log.Fatal("decode error")
-			}
-			if frameFinished == C.int(0) {
-				C.av_free_packet(&packet)
-				continue
-			}
-			// scale
-			vframe := <-framePool
-			C.sws_scale(swsCtx,
-				&frame.data[0], &frame.linesize[0], 0, codecCtx.height,
-				&vframe.data[0], &vframe.linesize[0])
-			frames <- vframe
 			C.av_free_packet(&packet)
 		}
 	}()
@@ -210,11 +278,13 @@ func main() {
 		switch C.get_event_type(ev) {
 		case C.SDL_QUIT:
 			running = false
+			os.Exit(0)
 		case C.SDL_KEYDOWN:
 			key := C.get_event_key(ev)
 			switch key.keysym.sym {
 			case C.SDLK_q:
 				running = false
+				os.Exit(0)
 			}
 		case C.SDL_USEREVENT:
 			if C.get_userevent_code(ev) == fpsEventCode {
