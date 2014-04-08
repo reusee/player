@@ -2,11 +2,9 @@ package main
 
 /*
 #include <libavcodec/avcodec.h>
-#include <libavformat/avformat.h>
-#include <libswscale/swscale.h>
 #include <SDL.h>
 #include <SDL_ttf.h>
-#cgo pkg-config: libavformat libavcodec libavutil libswscale sdl2 SDL2_ttf
+#cgo pkg-config: sdl2 SDL2_ttf
 
 static inline Uint32 get_event_type(SDL_Event ev) {
 	return ev.type;
@@ -55,89 +53,28 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
-	"reflect"
 	"runtime"
 	"sync"
-	"time"
 	"unsafe"
 )
+
+func init() {
+	go http.ListenAndServe(":55559", nil)
+}
 
 type AudioBuf struct {
 	*bytes.Buffer
 	sync.Mutex
 }
 
-func init() {
-	go http.ListenAndServe(":55559", nil)
-}
-
 func main() {
 	runtime.GOMAXPROCS(32)
-
-	// ffmpeg
-	C.av_register_all()
-
-	fileName := C.CString(os.Args[1])
-
-	var formatCtx *C.AVFormatContext
-	if C.avformat_open_input(&formatCtx, fileName, nil, nil) != C.int(0) {
-		log.Fatal("cannot open input")
-	}
-	if C.avformat_find_stream_info(formatCtx, nil) < 0 {
-		log.Fatal("no stream")
-	}
-	C.av_dump_format(formatCtx, 0, fileName, 0)
-	defer C.avformat_close_input(&formatCtx)
-
-	var streams []*C.AVStream
-	header := (*reflect.SliceHeader)(unsafe.Pointer(&streams))
-	header.Cap = int(formatCtx.nb_streams)
-	header.Len = int(formatCtx.nb_streams)
-	header.Data = uintptr(unsafe.Pointer(formatCtx.streams))
-
-	videoIndex := C.int(-1)
-	audioIndex := C.int(-1)
-	for i, stream := range streams {
-		if stream.codec.codec_type == C.AVMEDIA_TYPE_VIDEO && videoIndex == -1 {
-			videoIndex = C.int(i)
-		} else if stream.codec.codec_type == C.AVMEDIA_TYPE_AUDIO && audioIndex == -1 {
-			audioIndex = C.int(i)
-		}
-	}
-	if videoIndex == -1 {
-		log.Fatal("no video stream")
-	}
-	if audioIndex == -1 {
-		log.Fatal("no audio stream")
-	}
-
-	// video codec
-	vCodecCtx := streams[videoIndex].codec
-	defer C.avcodec_close(vCodecCtx)
-	codec := C.avcodec_find_decoder(vCodecCtx.codec_id)
-	if codec == nil {
-		log.Fatal("codec not found")
-	}
-	var options *C.AVDictionary
-	if C.avcodec_open2(vCodecCtx, codec, &options) < 0 {
-		log.Fatal("open codec error")
-	}
-
-	// audio codec
-	aCodecCtx := streams[audioIndex].codec
-	aCodec := C.avcodec_find_decoder(aCodecCtx.codec_id)
-	if aCodec == nil {
-		log.Fatal("audio codec not found")
-	}
-	if C.avcodec_open2(aCodecCtx, aCodec, &options) < 0 {
-		log.Fatal("open codec error")
-	}
 
 	// sdl
 	C.SDL_Init(C.SDL_INIT_AUDIO | C.SDL_INIT_VIDEO | C.SDL_INIT_TIMER)
 	defer C.SDL_Quit()
 	runtime.LockOSThread()
-	window := C.SDL_CreateWindow(C.CString("play"), 0, 0, vCodecCtx.width, vCodecCtx.height,
+	window := C.SDL_CreateWindow(C.CString("play"), 0, 0, 1024, 768,
 		C.SDL_WINDOW_BORDERLESS|C.SDL_WINDOW_RESIZABLE|C.SDL_WINDOW_MAXIMIZED)
 	if window == nil {
 		fatalSDLError()
@@ -149,10 +86,12 @@ func main() {
 		fatalSDLError()
 	}
 	defer C.SDL_DestroyRenderer(renderer)
+	var width, height C.int
+	C.SDL_GetWindowSize(window, &width, &height)
 	texture := C.SDL_CreateTexture(renderer,
 		C.SDL_PIXELFORMAT_YV12,
 		C.SDL_TEXTUREACCESS_STREAMING,
-		vCodecCtx.width, vCodecCtx.height)
+		width, height)
 	if texture == nil {
 		fatalSDLError()
 	}
@@ -169,8 +108,22 @@ func main() {
 	}
 	defer C.TTF_CloseFont(font)
 
+	// open video
+	video, err := NewVideo(os.Args[1])
+	if err != nil {
+		log.Fatal(err)
+	}
+	if len(video.AudioStreams) == 0 || len(video.VideoStreams) == 0 {
+		log.Fatal("no video or audio")
+	}
+	defer video.Close()
+
+	// audio
+	audioBuf := &AudioBuf{Buffer: new(bytes.Buffer)}
+
 	// sdl audio
 	var wantedSpec, spec C.SDL_AudioSpec
+	aCodecCtx := video.AudioStreams[0].codec
 	wantedSpec.freq = aCodecCtx.sample_rate
 	switch aCodecCtx.sample_fmt {
 	case C.AV_SAMPLE_FMT_FLTP:
@@ -182,7 +135,6 @@ func main() {
 	}
 	wantedSpec.channels = C.Uint8(aCodecCtx.channels)
 	wantedSpec.samples = 4096
-	audioBuf := &AudioBuf{Buffer: new(bytes.Buffer)}
 	C.setup_audio_callback(&wantedSpec, unsafe.Pointer(audioBuf))
 	dev := C.SDL_OpenAudioDevice(nil, 0, &wantedSpec, &spec, C.SDL_AUDIO_ALLOW_ANY_CHANGE)
 	if dev == 0 {
@@ -192,118 +144,16 @@ func main() {
 	defer C.SDL_CloseAudioDevice(dev)
 	C.SDL_PauseAudioDevice(dev, 0)
 
-	var startTime time.Time
-	running := true
-
-	// decoder
-	poolSize := 16
-	framePool := make(chan *C.AVFrame, poolSize)
-	frames := make(chan *C.AVFrame, 512)
-	numBytes := C.size_t(C.avpicture_get_size(C.PIX_FMT_YUV420P, vCodecCtx.width, vCodecCtx.height))
-	for i := 0; i < poolSize; i++ {
-		frame := C.av_frame_alloc()
-		buffer := (*C.uint8_t)(unsafe.Pointer(C.av_malloc(numBytes)))
-		C.avpicture_fill((*C.AVPicture)(unsafe.Pointer(frame)), buffer, C.PIX_FMT_YUV420P,
-			vCodecCtx.width, vCodecCtx.height)
-		framePool <- frame
-	}
-	go func() {
-		runtime.LockOSThread()
-		swsCtx := C.sws_getCachedContext(nil, vCodecCtx.width, vCodecCtx.height, vCodecCtx.pix_fmt,
-			vCodecCtx.width, vCodecCtx.height, C.PIX_FMT_YUV420P,
-			C.SWS_LANCZOS,
-			nil, nil, nil)
-		if swsCtx == nil {
-			log.Fatal("sws_getContext")
-		}
-		var packet C.AVPacket
-		var frameFinished, planeSize C.int
-		var pts C.double
-		frame := C.av_frame_alloc()
-		aFrame := C.av_frame_alloc()
-		startTime = time.Now()
-		for C.av_read_frame(formatCtx, &packet) >= 0 && running {
-			if packet.stream_index == videoIndex { // video
-				if C.avcodec_decode_video2(vCodecCtx, frame, &frameFinished, &packet) < C.int(0) {
-					goto next
-				}
-				if packet.dts != C.AV_NOPTS_VALUE { // get pts
-					pts = C.double(packet.dts)
-				} else {
-					log.Fatal("no pts info") //TODO
-				}
-				pts *= C.av_q2d(streams[packet.stream_index].time_base) * 1000
-				if frameFinished > 0 {
-					vframe := <-framePool
-					C.sws_scale(swsCtx,
-						&frame.data[0], &frame.linesize[0], 0, vCodecCtx.height,
-						&vframe.data[0], &vframe.linesize[0])
-					vframe.pts = C.int64_t(pts)
-					frames <- vframe
-				}
-			} else if packet.stream_index == audioIndex { // audio
-			decode:
-				l := C.avcodec_decode_audio4(aCodecCtx, aFrame, &frameFinished, &packet)
-				if l < 0 {
-					goto next
-				}
-				if frameFinished > 0 {
-					C.av_samples_get_buffer_size(&planeSize, aCodecCtx.channels, aFrame.nb_samples,
-						int32(aCodecCtx.sample_fmt), 1)
-					var planePointers []*byte
-					var planes [][]byte
-					h := (*reflect.SliceHeader)(unsafe.Pointer(&planePointers))
-					h.Len = int(aCodecCtx.channels)
-					h.Cap = h.Len
-					h.Data = uintptr(unsafe.Pointer(aFrame.extended_data))
-					for i := 0; i < int(aCodecCtx.channels); i++ {
-						var plane []byte
-						h := (*reflect.SliceHeader)(unsafe.Pointer(&plane))
-						h.Len = int(planeSize)
-						h.Cap = h.Len
-						h.Data = uintptr(unsafe.Pointer(planePointers[i]))
-						planes = append(planes, plane)
-					}
-					var scalarSize int
-					switch aCodecCtx.sample_fmt {
-					case C.AV_SAMPLE_FMT_FLTP:
-						scalarSize = 4
-					case C.AV_SAMPLE_FMT_S16P:
-						scalarSize = 2
-					default:
-						panic("unknown audio sample format") //TODO
-					}
-					audioBuf.Lock()
-					for i := 0; i < int(planeSize); i += scalarSize {
-						for ch := 0; ch < int(aCodecCtx.channels); ch++ {
-							audioBuf.Write(planes[ch][i : i+scalarSize])
-						}
-					}
-					audioBuf.Unlock()
-				}
-				if l != packet.size { // multiple frame packet
-					packet.size -= l
-					packet.data = (*C.uint8_t)(unsafe.Pointer(uintptr(unsafe.Pointer(packet.data)) + uintptr(l)))
-					goto decode
-				}
-			}
-		next:
-			C.av_free_packet(&packet)
-		}
-	}()
-
+	// decode
 	timedFrames := make(chan *C.AVFrame)
-	go func() {
-		for frame := range frames {
-			delta := time.Duration(frame.pts) - time.Now().Sub(startTime)/time.Millisecond
-			if delta > 0 {
-				time.Sleep(delta * time.Millisecond)
-			}
-			timedFrames <- frame
-		}
-	}()
+	decoder := video.Decode(video.VideoStreams[0], video.AudioStreams[0],
+		width, height,
+		timedFrames,
+		audioBuf)
+	defer decoder.Close()
 
 	// render
+	running := true
 	var ev C.SDL_Event
 	fpsEventCode := C.add_ticker(1000)
 	i := 0
@@ -325,7 +175,7 @@ func main() {
 		C.SDL_RenderCopy(renderer, texture, nil, nil)
 		C.SDL_RenderCopy(renderer, fpsTexture, &fpsSrc, &fpsDst)
 		C.SDL_RenderPresent(renderer)
-		framePool <- frame
+		decoder.RecycleFrame(frame)
 
 		// sdl event
 		if C.SDL_PollEvent(&ev) == C.int(0) {
