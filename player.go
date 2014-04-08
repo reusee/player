@@ -209,9 +209,9 @@ func main() {
 	}
 	go func() {
 		runtime.LockOSThread()
-		swsCtx := C.sws_getContext(vCodecCtx.width, vCodecCtx.height, vCodecCtx.pix_fmt,
-			vCodecCtx.width, vCodecCtx.height,
-			C.PIX_FMT_YUV420P, C.SWS_BILINEAR,
+		swsCtx := C.sws_getCachedContext(nil, vCodecCtx.width, vCodecCtx.height, vCodecCtx.pix_fmt,
+			vCodecCtx.width, vCodecCtx.height, C.PIX_FMT_YUV420P,
+			C.SWS_LANCZOS,
 			nil, nil, nil)
 		if swsCtx == nil {
 			log.Fatal("sws_getContext")
@@ -295,7 +295,7 @@ func main() {
 	timedFrames := make(chan *C.AVFrame)
 	go func() {
 		for frame := range frames {
-			delta := time.Duration(frame.pts) - time.Now().Sub(startTime) / time.Millisecond
+			delta := time.Duration(frame.pts) - time.Now().Sub(startTime)/time.Millisecond
 			if delta > 0 {
 				time.Sleep(delta * time.Millisecond)
 			}
