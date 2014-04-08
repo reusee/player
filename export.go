@@ -7,14 +7,11 @@ import (
 	"unsafe"
 )
 
-var reader *AudioBuf
-var header *reflect.SliceHeader
-
 //export provideAudio
 func provideAudio(readerP unsafe.Pointer, stream unsafe.Pointer, l C.int) {
-	reader = (*AudioBuf)(readerP)
+	reader := (*AudioBuf)(readerP)
 	var s []byte
-	header = (*reflect.SliceHeader)(unsafe.Pointer(&s))
+	header := (*reflect.SliceHeader)(unsafe.Pointer(&s))
 	header.Len = int(l)
 	header.Cap = int(l)
 	header.Data = uintptr(stream)

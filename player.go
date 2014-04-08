@@ -58,6 +58,7 @@ import (
 	"reflect"
 	"runtime"
 	"sync"
+	"time"
 	"unsafe"
 )
 
@@ -191,12 +192,13 @@ func main() {
 	defer C.SDL_CloseAudioDevice(dev)
 	C.SDL_PauseAudioDevice(dev, 0)
 
+	var startTime time.Time
 	running := true
 
 	// decoder
 	poolSize := 16
 	framePool := make(chan *C.AVFrame, poolSize)
-	frames := make(chan *C.AVFrame, poolSize)
+	frames := make(chan *C.AVFrame, 512)
 	numBytes := C.size_t(C.avpicture_get_size(C.PIX_FMT_YUV420P, vCodecCtx.width, vCodecCtx.height))
 	for i := 0; i < poolSize; i++ {
 		frame := C.av_frame_alloc()
@@ -216,27 +218,34 @@ func main() {
 		}
 		var packet C.AVPacket
 		var frameFinished, planeSize C.int
+		var pts C.double
 		frame := C.av_frame_alloc()
 		aFrame := C.av_frame_alloc()
+		startTime = time.Now()
 		for C.av_read_frame(formatCtx, &packet) >= 0 && running {
-			// video packet
-			if packet.stream_index == videoIndex {
+			if packet.stream_index == videoIndex { // video
 				if C.avcodec_decode_video2(vCodecCtx, frame, &frameFinished, &packet) < C.int(0) {
-					log.Fatal("video decode error")
+					goto next
 				}
+				if packet.dts != C.AV_NOPTS_VALUE { // get pts
+					pts = C.double(packet.dts)
+				} else {
+					log.Fatal("no pts info") //TODO
+				}
+				pts *= C.av_q2d(streams[packet.stream_index].time_base) * 1000
 				if frameFinished > 0 {
 					vframe := <-framePool
 					C.sws_scale(swsCtx,
 						&frame.data[0], &frame.linesize[0], 0, vCodecCtx.height,
 						&vframe.data[0], &vframe.linesize[0])
+					vframe.pts = C.int64_t(pts)
 					frames <- vframe
 				}
-				// audio packet
-			} else if packet.stream_index == audioIndex {
+			} else if packet.stream_index == audioIndex { // audio
 			decode:
 				l := C.avcodec_decode_audio4(aCodecCtx, aFrame, &frameFinished, &packet)
 				if l < 0 {
-					log.Fatal("audio decode error")
+					goto next
 				}
 				if frameFinished > 0 {
 					C.av_samples_get_buffer_size(&planeSize, aCodecCtx.channels, aFrame.nb_samples,
@@ -278,7 +287,19 @@ func main() {
 					goto decode
 				}
 			}
+		next:
 			C.av_free_packet(&packet)
+		}
+	}()
+
+	timedFrames := make(chan *C.AVFrame)
+	go func() {
+		for frame := range frames {
+			delta := time.Duration(frame.pts) - time.Now().Sub(startTime) / time.Millisecond
+			if delta > 0 {
+				time.Sleep(delta * time.Millisecond)
+			}
+			timedFrames <- frame
 		}
 	}()
 
@@ -295,16 +316,16 @@ func main() {
 	fpsColor.a = 0
 	for running {
 		// render frame
-		vframe := <-frames
+		frame := <-timedFrames
 		i++
 		C.SDL_UpdateYUVTexture(texture, nil,
-			(*C.Uint8)(unsafe.Pointer(vframe.data[0])), vframe.linesize[0],
-			(*C.Uint8)(unsafe.Pointer(vframe.data[1])), vframe.linesize[1],
-			(*C.Uint8)(unsafe.Pointer(vframe.data[2])), vframe.linesize[2])
+			(*C.Uint8)(unsafe.Pointer(frame.data[0])), frame.linesize[0],
+			(*C.Uint8)(unsafe.Pointer(frame.data[1])), frame.linesize[1],
+			(*C.Uint8)(unsafe.Pointer(frame.data[2])), frame.linesize[2])
 		C.SDL_RenderCopy(renderer, texture, nil, nil)
 		C.SDL_RenderCopy(renderer, fpsTexture, &fpsSrc, &fpsDst)
 		C.SDL_RenderPresent(renderer)
-		framePool <- vframe
+		framePool <- frame
 
 		// sdl event
 		if C.SDL_PollEvent(&ev) == C.int(0) {
