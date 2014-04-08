@@ -171,7 +171,14 @@ func main() {
 	// sdl audio
 	var wantedSpec, spec C.SDL_AudioSpec
 	wantedSpec.freq = aCodecCtx.sample_rate
-	wantedSpec.format = C.AUDIO_F32SYS
+	switch aCodecCtx.sample_fmt {
+	case C.AV_SAMPLE_FMT_FLTP:
+		wantedSpec.format = C.AUDIO_F32SYS
+	case C.AV_SAMPLE_FMT_S16P:
+		wantedSpec.format = C.AUDIO_S16SYS
+	default:
+		panic("unknown audio sample format")
+	}
 	wantedSpec.channels = C.Uint8(aCodecCtx.channels)
 	wantedSpec.samples = 4096
 	audioBuf := &AudioBuf{Buffer: new(bytes.Buffer)}
@@ -180,9 +187,9 @@ func main() {
 	if dev == 0 {
 		fatalSDLError()
 	}
+	fmt.Printf("%v\n%v\n", wantedSpec, spec)
 	defer C.SDL_CloseAudioDevice(dev)
 	C.SDL_PauseAudioDevice(dev, 0)
-	fmt.Printf("want %v\nhas %v\n", wantedSpec, spec)
 
 	running := true
 
@@ -208,7 +215,7 @@ func main() {
 			log.Fatal("sws_getContext")
 		}
 		var packet C.AVPacket
-		var frameFinished C.int
+		var frameFinished, planeSize C.int
 		frame := C.av_frame_alloc()
 		aFrame := C.av_frame_alloc()
 		for C.av_read_frame(formatCtx, &packet) >= 0 && running {
@@ -226,21 +233,49 @@ func main() {
 				}
 				// audio packet
 			} else if packet.stream_index == audioIndex {
+			decode:
 				l := C.avcodec_decode_audio4(aCodecCtx, aFrame, &frameFinished, &packet)
 				if l < 0 {
 					log.Fatal("audio decode error")
 				}
-				if l != packet.size { //TODO
-					log.Fatal("FIXME: multiple frame packet")
-				}
 				if frameFinished > 0 {
-					dataSize := C.av_samples_get_buffer_size(nil, aCodecCtx.channels, aFrame.nb_samples,
-						int32(aFrame.format), 1)
-					//fmt.Printf("data size %d, %d frames, %d channels\n", dataSize, aFrame.nb_samples, aCodecCtx.channels)
-					//TODO resample
+					C.av_samples_get_buffer_size(&planeSize, aCodecCtx.channels, aFrame.nb_samples,
+						int32(aCodecCtx.sample_fmt), 1)
+					var planePointers []*byte
+					var planes [][]byte
+					h := (*reflect.SliceHeader)(unsafe.Pointer(&planePointers))
+					h.Len = int(aCodecCtx.channels)
+					h.Cap = h.Len
+					h.Data = uintptr(unsafe.Pointer(aFrame.extended_data))
+					for i := 0; i < int(aCodecCtx.channels); i++ {
+						var plane []byte
+						h := (*reflect.SliceHeader)(unsafe.Pointer(&plane))
+						h.Len = int(planeSize)
+						h.Cap = h.Len
+						h.Data = uintptr(unsafe.Pointer(planePointers[i]))
+						planes = append(planes, plane)
+					}
+					var scalarSize int
+					switch aCodecCtx.sample_fmt {
+					case C.AV_SAMPLE_FMT_FLTP:
+						scalarSize = 4
+					case C.AV_SAMPLE_FMT_S16P:
+						scalarSize = 2
+					default:
+						panic("unknown audio sample format") //TODO
+					}
 					audioBuf.Lock()
-					audioBuf.Write(C.GoBytes(unsafe.Pointer(aFrame.data[0]), dataSize))
+					for i := 0; i < int(planeSize); i += scalarSize {
+						for ch := 0; ch < int(aCodecCtx.channels); ch++ {
+							audioBuf.Write(planes[ch][i : i+scalarSize])
+						}
+					}
 					audioBuf.Unlock()
+				}
+				if l != packet.size { // multiple frame packet
+					packet.size -= l
+					packet.data = (*C.uint8_t)(unsafe.Pointer(uintptr(unsafe.Pointer(packet.data)) + uintptr(l)))
+					goto decode
 				}
 			}
 			C.av_free_packet(&packet)

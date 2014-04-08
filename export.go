@@ -19,6 +19,6 @@ func provideAudio(readerP unsafe.Pointer, stream unsafe.Pointer, l C.int) {
 	header.Cap = int(l)
 	header.Data = uintptr(stream)
 	reader.Lock()
-	defer reader.Unlock()
 	io.ReadFull(reader, s)
+	reader.Unlock()
 }
