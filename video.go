@@ -89,6 +89,7 @@ type Decoder struct {
 	running   bool
 	frameChan chan *C.AVFrame
 	pool      chan *C.AVFrame
+	seek_req  time.Duration
 }
 
 func (self *Video) Decode(videoStream, audioStream *C.AVStream,
@@ -120,6 +121,7 @@ func (self *Video) Decode(videoStream, audioStream *C.AVStream,
 	// decode
 	frameChan := make(chan *C.AVFrame, 512)
 	decoder.frameChan = frameChan
+	var afterSeek bool // set to true after seek succeed
 	go func() {
 		runtime.LockOSThread()
 
@@ -139,8 +141,30 @@ func (self *Video) Decode(videoStream, audioStream *C.AVStream,
 		audioIndex := audioStream.index
 
 		decoder.Timer = NewTimer()
+		var seekPosMilli int64
+		var expectPosMilli int64
 		// decode
-		for C.av_read_frame(self.FormatContext, &packet) >= 0 && decoder.running {
+		for decoder.running {
+			if decoder.seek_req > 0 { // seek request
+				seekPosMilli = int64(decoder.Timer.Now() / time.Millisecond)
+				expectPosMilli = int64((decoder.Timer.Now() + decoder.seek_req) / time.Millisecond)
+				fmt.Printf("expected %d\n", expectPosMilli)
+			}
+		seek:
+			if decoder.seek_req > 0 {
+				seekPosMilli += int64(decoder.seek_req/time.Millisecond) / 3
+				if C.av_seek_frame(self.FormatContext, -1, C.int64_t(seekPosMilli/1000*C.AV_TIME_BASE),
+					C.AVSEEK_FLAG_ANY|C.AVSEEK_FLAG_BACKWARD) < 0 {
+					log.Fatal("seek error")
+				}
+				for _, stream := range self.Streams {
+					C.avcodec_flush_buffers(stream.codec)
+				}
+			}
+
+			if C.av_read_frame(self.FormatContext, &packet) < 0 { // read packet
+				log.Fatal("read frame error")
+			}
 
 			if packet.stream_index == videoIndex { // video
 				if C.avcodec_decode_video2(vCodecCtx, vFrame, &frameFinished, &packet) < 0 { // bad packet
@@ -152,11 +176,22 @@ func (self *Video) Decode(videoStream, audioStream *C.AVStream,
 					panic("FIXME: no pts info") //TODO
 				}
 				pts *= C.av_q2d(videoStream.time_base) * 1000
+				if decoder.seek_req > 0 { // check whether seek succeed
+					if int64(pts) < expectPosMilli {
+						fmt.Printf("got %d, seek again\n", int64(pts))
+						goto seek // seek again
+					} else {
+						fmt.Printf("seek done at %d\n", int64(pts))
+						decoder.seek_req = 0 // seek succeed
+						decoder.Timer.Jump(time.Duration(pts)*time.Millisecond - decoder.Timer.Now())
+						afterSeek = true
+					}
+				}
 				if frameFinished > 0 { // got frame
 					bufFrame := <-pool        // get frame buffer
 					C.sws_scale(scaleContext, // scale
 						&vFrame.data[0], &vFrame.linesize[0], 0, vCodecCtx.height,
-						&bufFrame.data[0], &bufFrame.linesize[0])
+						&bufFrame.data[0], &bufFrame.linesize[0]) //TODO bug here
 					bufFrame.pts = C.int64_t(pts) // set pts
 					frameChan <- bufFrame         // push to queue
 				}
@@ -172,8 +207,18 @@ func (self *Video) Decode(videoStream, audioStream *C.AVStream,
 				} else {
 					panic("FIXME: no pts info") //TODO
 				}
-				pts *= C.av_q2d(videoStream.time_base) * 1000
-				//TODO sync audio
+				pts *= C.av_q2d(audioStream.time_base) * 1000
+				if decoder.seek_req > 0 { // check whether seek succeed
+					if int64(pts) < expectPosMilli {
+						fmt.Printf("got %d, seek again\n", int64(pts))
+						goto seek // seek again
+					} else {
+						fmt.Printf("seek done at %d\n", int64(pts))
+						decoder.seek_req = 0 // seek succeed
+						decoder.Timer.Jump(time.Duration(pts)*time.Millisecond - decoder.Timer.Now())
+						afterSeek = true
+					}
+				}
 				if frameFinished > 0 {
 					C.av_samples_get_buffer_size(&planeSize, aCodecCtx.channels, aFrame.nb_samples,
 						int32(aCodecCtx.sample_fmt), 1)
@@ -224,8 +269,18 @@ func (self *Video) Decode(videoStream, audioStream *C.AVStream,
 	go func() {
 		for frame := range frameChan {
 			delta := time.Duration(frame.pts) - decoder.Timer.Now()/time.Millisecond
+			//fmt.Printf("pts %d, timer %d, delta %d\n", frame.pts, decoder.Timer.Now()/time.Millisecond, delta)
 			if delta > 0 {
-				time.Sleep(delta * time.Millisecond)
+				if afterSeek { // first frame after seek
+					decoder.Timer.Jump(delta * time.Millisecond)
+					print("timer jumped\n")
+					afterSeek = false
+				} else {
+					time.Sleep(delta * time.Millisecond)
+				}
+			} else if delta < 0 { // drop frame
+				decoder.RecycleFrame(frame)
+				continue
 			}
 			videoFrameChan <- frame
 		}
@@ -247,4 +302,8 @@ func (self *Decoder) Close() {
 
 func (self *Decoder) RecycleFrame(frame *C.AVFrame) {
 	self.pool <- frame
+}
+
+func (self *Decoder) Seek(t time.Duration) {
+	self.seek_req = t
 }

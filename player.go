@@ -217,8 +217,10 @@ func main() {
 		case C.SDL_KEYDOWN:
 			key := C.get_event_key(&ev)
 			switch key.keysym.sym {
-			case C.SDLK_q:
+			case C.SDLK_q: // quit
 				os.Exit(0)
+			case C.SDLK_f: // forward
+				decoder.Seek(time.Second * 60)
 			}
 		case C.SDL_USEREVENT:
 			if C.get_userevent_code(&ev) == callEventCode {
