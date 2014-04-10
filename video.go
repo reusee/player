@@ -143,6 +143,7 @@ func (self *Video) Decode(videoStream, audioStream *C.AVStream,
 		decoder.Timer = NewTimer()
 		var seekPosMilli int64
 		var expectPosMilli int64
+		fileDuration := int64(self.FormatContext.duration / 1000)
 		// decode
 		for decoder.running {
 			if decoder.seek_req > 0 { // seek request
@@ -151,6 +152,10 @@ func (self *Video) Decode(videoStream, audioStream *C.AVStream,
 				fmt.Printf("expected %d\n", expectPosMilli)
 			}
 		seek:
+			if expectPosMilli > fileDuration {
+				decoder.seek_req = 0
+			}
+			fmt.Printf("max %d, seek %d, expect %d\n", fileDuration, seekPosMilli, expectPosMilli)
 			if decoder.seek_req > 0 {
 				seekPosMilli += int64(decoder.seek_req/time.Millisecond) / 2
 				if C.av_seek_frame(self.FormatContext, -1, C.int64_t(seekPosMilli/1000*C.AV_TIME_BASE),
