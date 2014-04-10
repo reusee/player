@@ -165,6 +165,13 @@ func (self *Video) Decode(videoStream, audioStream *C.AVStream,
 				if l < 0 {
 					goto next
 				}
+				if packet.dts != C.AV_NOPTS_VALUE { // get pts
+					pts = C.double(packet.dts)
+				} else {
+					panic("FIXME: no pts info") //TODO
+				}
+				pts *= C.av_q2d(videoStream.time_base) * 1000
+				//TODO sync audio
 				if frameFinished > 0 {
 					C.av_samples_get_buffer_size(&planeSize, aCodecCtx.channels, aFrame.nb_samples,
 						int32(aCodecCtx.sample_fmt), 1)

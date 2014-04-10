@@ -43,7 +43,6 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
-	"reflect"
 	"runtime"
 	"sync"
 	"time"
@@ -146,13 +145,12 @@ func main() {
 
 	// call closure in sdl thread
 	callEventCode := C.SDL_RegisterEvents(1)
-	call := func(f func(*C.SDL_Renderer, *C.SDL_Texture)) {
+	call := func(f func(env Env)) {
 		var event C.SDL_Event
 		var userevent C.SDL_UserEvent
 		userevent._type = C.SDL_USEREVENT
 		userevent.code = C.Sint32(callEventCode)
-		fValue := reflect.ValueOf(f)
-		userevent.data1 = unsafe.Pointer(&fValue)
+		userevent.data1 = unsafe.Pointer(&f)
 		C.set_userevent(&event, userevent)
 		C.SDL_PushEvent(&event)
 	}
@@ -168,7 +166,7 @@ func main() {
 	fpsColor.a = 0
 	go func() {
 		for _ = range time.NewTicker(time.Second * 1).C {
-			call(func(r *C.SDL_Renderer, t *C.SDL_Texture) {
+			call(func(env Env) {
 				cText := C.CString(fmt.Sprintf("%d", nFrames))
 				sur := C.TTF_RenderUTF8_Blended(font, cText, fpsColor)
 				fpsSrc.w = sur.w
@@ -176,7 +174,7 @@ func main() {
 				fpsDst.w = sur.w
 				fpsDst.h = sur.h
 				C.SDL_DestroyTexture(fpsTexture)
-				fpsTexture = C.SDL_CreateTextureFromSurface(renderer, sur)
+				fpsTexture = C.SDL_CreateTextureFromSurface(env.renderer, sur)
 				C.SDL_FreeSurface(sur)
 				C.free(unsafe.Pointer(cText))
 				nFrames = 0
@@ -189,14 +187,14 @@ func main() {
 		for {
 			frame := <-timedFrames
 			nFrames++
-			call(func(r *C.SDL_Renderer, t *C.SDL_Texture) {
-				C.SDL_UpdateYUVTexture(texture, nil,
+			call(func(env Env) {
+				C.SDL_UpdateYUVTexture(env.texture, nil,
 					(*C.Uint8)(unsafe.Pointer(frame.data[0])), frame.linesize[0],
 					(*C.Uint8)(unsafe.Pointer(frame.data[1])), frame.linesize[1],
 					(*C.Uint8)(unsafe.Pointer(frame.data[2])), frame.linesize[2])
-				C.SDL_RenderCopy(renderer, texture, nil, nil)
-				C.SDL_RenderCopy(renderer, fpsTexture, &fpsSrc, &fpsDst)
-				C.SDL_RenderPresent(renderer)
+				C.SDL_RenderCopy(env.renderer, env.texture, nil, nil)
+				C.SDL_RenderCopy(env.renderer, fpsTexture, &fpsSrc, &fpsDst)
+				C.SDL_RenderPresent(env.renderer)
 				decoder.RecycleFrame(frame)
 			})
 		}
@@ -204,9 +202,10 @@ func main() {
 
 	// main loop
 	var ev C.SDL_Event
-	args := []reflect.Value{
-		reflect.ValueOf(renderer),
-		reflect.ValueOf(texture),
+	env := Env{
+		window:   window,
+		renderer: renderer,
+		texture:  texture,
 	}
 	for {
 		if C.SDL_WaitEvent(&ev) == C.int(0) {
@@ -223,11 +222,17 @@ func main() {
 			}
 		case C.SDL_USEREVENT:
 			if C.get_userevent_code(&ev) == callEventCode {
-				f := *((*reflect.Value)(C.get_event_data1(&ev)))
-				f.Call(args)
+				f := *((*func(Env))(C.get_event_data1(&ev)))
+				f(env)
 			}
 		}
 	}
+}
+
+type Env struct {
+	window   *C.SDL_Window
+	renderer *C.SDL_Renderer
+	texture  *C.SDL_Texture
 }
 
 func fatalSDLError() {
