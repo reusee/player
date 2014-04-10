@@ -48,13 +48,13 @@ func NewTimer() *Timer {
 				} else {
 					timer.now = time.Now().Sub(timer.startTime)
 				}
-				timer.cond.L.Lock()
-				timer.dirty = false
-				timer.cond.Broadcast()
-				timer.cond.L.Unlock()
 			default:
 				timer.startTime = timer.startTime.Add(-time.Duration(req))
 			}
+			timer.cond.L.Lock()
+			timer.dirty = false
+			timer.cond.Broadcast()
+			timer.cond.L.Unlock()
 		}
 	}()
 	return timer
@@ -63,22 +63,42 @@ func NewTimer() *Timer {
 func (self *Timer) Now() time.Duration {
 	self.dirty = true
 	self.control <- TIMER_GET
+
 	self.cond.L.Lock()
 	for self.dirty {
 		self.cond.Wait()
 	}
 	self.cond.L.Unlock()
+
 	return self.now
 }
 
 func (self *Timer) Start() {
 	self.control <- TIMER_START
+
+	self.cond.L.Lock()
+	for self.dirty {
+		self.cond.Wait()
+	}
+	self.cond.L.Unlock()
 }
 
 func (self *Timer) Pause() {
 	self.control <- TIMER_PAUSE
+
+	self.cond.L.Lock()
+	for self.dirty {
+		self.cond.Wait()
+	}
+	self.cond.L.Unlock()
 }
 
 func (self *Timer) Jump(d time.Duration) {
 	self.control <- int64(d)
+
+	self.cond.L.Lock()
+	for self.dirty {
+		self.cond.Wait()
+	}
+	self.cond.L.Unlock()
 }
