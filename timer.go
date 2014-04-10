@@ -53,7 +53,7 @@ func NewTimer() *Timer {
 				timer.cond.Broadcast()
 				timer.cond.L.Unlock()
 			default:
-				timer.startTime = timer.startTime.Add(time.Duration(req))
+				timer.startTime = timer.startTime.Add(-time.Duration(req))
 			}
 		}
 	}()

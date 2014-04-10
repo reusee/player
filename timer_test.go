@@ -30,6 +30,13 @@ func TestTimer(t *testing.T) {
 	if !(now >= time.Millisecond*500 && now < time.Millisecond*501) {
 		t.Fail()
 	}
+
+	timer.Jump(time.Millisecond * 500)
+	fmt.Printf("%v\n", timer.Now())
+	now = timer.Now()
+	if !(now >= time.Second && now < time.Second + time.Millisecond) {
+		t.Fail()
+	}
 }
 
 func BenchmarkTimer(b *testing.B) {
