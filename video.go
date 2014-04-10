@@ -152,9 +152,9 @@ func (self *Video) Decode(videoStream, audioStream *C.AVStream,
 			}
 		seek:
 			if decoder.seek_req > 0 {
-				seekPosMilli += int64(decoder.seek_req/time.Millisecond) / 3
+				seekPosMilli += int64(decoder.seek_req/time.Millisecond) / 2
 				if C.av_seek_frame(self.FormatContext, -1, C.int64_t(seekPosMilli/1000*C.AV_TIME_BASE),
-					C.AVSEEK_FLAG_ANY|C.AVSEEK_FLAG_BACKWARD) < 0 {
+					C.AVSEEK_FLAG_BACKWARD) < 0 {
 					log.Fatal("seek error")
 				}
 				for _, stream := range self.Streams {
@@ -267,6 +267,7 @@ func (self *Video) Decode(videoStream, audioStream *C.AVStream,
 
 	// sync video
 	go func() {
+		//TODO jump timer when delta is bigger than max
 		for frame := range frameChan {
 			delta := time.Duration(frame.pts) - decoder.Timer.Now()/time.Millisecond
 			//fmt.Printf("pts %d, timer %d, delta %d\n", frame.pts, decoder.Timer.Now()/time.Millisecond, delta)
