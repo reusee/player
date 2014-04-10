@@ -83,7 +83,7 @@ func (self *Video) Close() {
 }
 
 type Decoder struct {
-	StartTime time.Time
+	Timer     *Timer
 	frames    []*C.AVFrame
 	buffers   []*C.uint8_t
 	running   bool
@@ -138,9 +138,10 @@ func (self *Video) Decode(videoStream, audioStream *C.AVStream,
 		videoIndex := videoStream.index
 		audioIndex := audioStream.index
 
-		decoder.StartTime = time.Now()
+		decoder.Timer = NewTimer()
 		// decode
 		for C.av_read_frame(self.FormatContext, &packet) >= 0 && decoder.running {
+
 			if packet.stream_index == videoIndex { // video
 				if C.avcodec_decode_video2(vCodecCtx, vFrame, &frameFinished, &packet) < 0 { // bad packet
 					goto next
@@ -159,6 +160,7 @@ func (self *Video) Decode(videoStream, audioStream *C.AVStream,
 					bufFrame.pts = C.int64_t(pts) // set pts
 					frameChan <- bufFrame         // push to queue
 				}
+
 			} else if packet.stream_index == audioIndex { // audio
 			decode:
 				l := C.avcodec_decode_audio4(aCodecCtx, aFrame, &frameFinished, &packet)
@@ -212,6 +214,7 @@ func (self *Video) Decode(videoStream, audioStream *C.AVStream,
 					goto decode
 				}
 			}
+
 		next:
 			C.av_free_packet(&packet)
 		}
@@ -220,7 +223,7 @@ func (self *Video) Decode(videoStream, audioStream *C.AVStream,
 	// sync video
 	go func() {
 		for frame := range frameChan {
-			delta := time.Duration(frame.pts) - time.Now().Sub(decoder.StartTime)/time.Millisecond
+			delta := time.Duration(frame.pts) - decoder.Timer.Now()/time.Millisecond
 			if delta > 0 {
 				time.Sleep(delta * time.Millisecond)
 			}
