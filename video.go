@@ -152,10 +152,9 @@ func (self *Video) Decode(videoStream, audioStream *C.AVStream,
 				fmt.Printf("expected %d\n", expectPosMilli)
 			}
 		seek:
-			if expectPosMilli > fileDuration {
+			if decoder.seek_req > 0 && expectPosMilli > fileDuration {
 				decoder.seek_req = 0
 			}
-			fmt.Printf("max %d, seek %d, expect %d\n", fileDuration, seekPosMilli, expectPosMilli)
 			if decoder.seek_req > 0 {
 				seekPosMilli += int64(decoder.seek_req/time.Millisecond) / 2
 				if C.av_seek_frame(self.FormatContext, -1, C.int64_t(seekPosMilli/1000*C.AV_TIME_BASE),
@@ -169,6 +168,7 @@ func (self *Video) Decode(videoStream, audioStream *C.AVStream,
 
 			if C.av_read_frame(self.FormatContext, &packet) < 0 { // read packet
 				log.Fatal("read frame error")
+				//TODO stop gracefully
 			}
 
 			if packet.stream_index == videoIndex { // video
@@ -282,7 +282,7 @@ func (self *Video) Decode(videoStream, audioStream *C.AVStream,
 					print("timer jumped\n")
 					afterSeek = false
 				} else {
-					time.Sleep(delta * time.Millisecond)
+					//time.Sleep(delta * time.Millisecond)
 				}
 			} else if delta < 0 { // drop frame
 				decoder.RecycleFrame(frame)
