@@ -6,34 +6,24 @@ package main
 #include <SDL_ttf.h>
 #cgo pkg-config: sdl2 SDL2_ttf
 
-static inline Uint32 get_event_type(SDL_Event ev) {
-	return ev.type;
+static inline Uint32 get_event_type(SDL_Event *ev) {
+	return ev->type;
 }
-static inline SDL_KeyboardEvent get_event_key(SDL_Event ev) {
-	return ev.key;
+static inline SDL_KeyboardEvent get_event_key(SDL_Event *ev) {
+	return ev->key;
 }
-static inline int get_userevent_code(SDL_Event ev) {
-	return ev.user.code;
+static inline Uint32 get_userevent_code(SDL_Event *ev) {
+	return ev->user.code;
 }
-
-Uint32 ticker(Uint32 interval, void* param) {
-	SDL_Event event;
-	SDL_UserEvent userevent;
-	userevent.type = SDL_USEREVENT;
-	userevent.code = *((int*)param);
-	userevent.data1 = NULL;
-	userevent.data2 = NULL;
-	event.type = SDL_USEREVENT;
-	event.user = userevent;
-	SDL_PushEvent(&event);
-	return (interval);
+static inline void* get_event_data1(SDL_Event *ev) {
+	return ev->user.data1;
 }
-int add_ticker(int interval) {
-	int code = SDL_RegisterEvents(1);
-	int* c = SDL_malloc(sizeof(int));
-	*c = code;
-	SDL_AddTimer(interval, ticker, c);
-	return code;
+static inline void* get_event_data2(SDL_Event *ev) {
+	return ev->user.data2;
+}
+static inline set_userevent(SDL_Event *ev, SDL_UserEvent ue) {
+	ev->type = SDL_USEREVENT;
+	ev->user = ue;
 }
 
 static inline void audio_callback(void *userdata, Uint8 *stream, int len) {
@@ -53,8 +43,10 @@ import (
 	"net/http"
 	_ "net/http/pprof"
 	"os"
+	"reflect"
 	"runtime"
 	"sync"
+	"time"
 	"unsafe"
 )
 
@@ -74,8 +66,8 @@ func main() {
 	C.SDL_Init(C.SDL_INIT_AUDIO | C.SDL_INIT_VIDEO | C.SDL_INIT_TIMER)
 	defer C.SDL_Quit()
 	runtime.LockOSThread()
-	window := C.SDL_CreateWindow(C.CString("play"), 0, 0, 1024, 768,
-		C.SDL_WINDOW_BORDERLESS|C.SDL_WINDOW_RESIZABLE|C.SDL_WINDOW_MAXIMIZED)
+	window := C.SDL_CreateWindow(C.CString("play"), 0, 0, 1680, 1050,
+		C.SDL_WINDOW_BORDERLESS|C.SDL_WINDOW_RESIZABLE|C.SDL_WINDOW_MAXIMIZED|C.SDL_WINDOW_OPENGL)
 	if window == nil {
 		fatalSDLError()
 	}
@@ -144,7 +136,7 @@ func main() {
 	defer C.SDL_CloseAudioDevice(dev)
 	C.SDL_PauseAudioDevice(dev, 0)
 
-	// decode
+	// decoder
 	timedFrames := make(chan *C.AVFrame)
 	decoder := video.Decode(video.VideoStreams[0], video.AudioStreams[0],
 		width, height,
@@ -152,11 +144,21 @@ func main() {
 		audioBuf)
 	defer decoder.Close()
 
-	// render
-	running := true
-	var ev C.SDL_Event
-	fpsEventCode := C.add_ticker(1000)
-	i := 0
+	// call closure in sdl thread
+	callEventCode := C.SDL_RegisterEvents(1)
+	call := func(f func(*C.SDL_Renderer, *C.SDL_Texture)) {
+		var event C.SDL_Event
+		var userevent C.SDL_UserEvent
+		userevent._type = C.SDL_USEREVENT
+		userevent.code = C.Sint32(callEventCode)
+		fValue := reflect.ValueOf(f)
+		userevent.data1 = unsafe.Pointer(&fValue)
+		C.set_userevent(&event, userevent)
+		C.SDL_PushEvent(&event)
+	}
+
+	// show fps
+	nFrames := 0
 	var fpsTexture *C.SDL_Texture
 	var fpsColor C.SDL_Color
 	var fpsSrc, fpsDst C.SDL_Rect
@@ -164,37 +166,10 @@ func main() {
 	fpsColor.g = 255
 	fpsColor.b = 255
 	fpsColor.a = 0
-	for running {
-		// render frame
-		frame := <-timedFrames
-		i++
-		C.SDL_UpdateYUVTexture(texture, nil,
-			(*C.Uint8)(unsafe.Pointer(frame.data[0])), frame.linesize[0],
-			(*C.Uint8)(unsafe.Pointer(frame.data[1])), frame.linesize[1],
-			(*C.Uint8)(unsafe.Pointer(frame.data[2])), frame.linesize[2])
-		C.SDL_RenderCopy(renderer, texture, nil, nil)
-		C.SDL_RenderCopy(renderer, fpsTexture, &fpsSrc, &fpsDst)
-		C.SDL_RenderPresent(renderer)
-		decoder.RecycleFrame(frame)
-
-		// sdl event
-		if C.SDL_PollEvent(&ev) == C.int(0) {
-			continue
-		}
-		switch C.get_event_type(ev) {
-		case C.SDL_QUIT:
-			running = false
-			os.Exit(0)
-		case C.SDL_KEYDOWN:
-			key := C.get_event_key(ev)
-			switch key.keysym.sym {
-			case C.SDLK_q:
-				running = false
-				os.Exit(0)
-			}
-		case C.SDL_USEREVENT:
-			if C.get_userevent_code(ev) == fpsEventCode {
-				cText := C.CString(fmt.Sprintf("%d", i))
+	go func() {
+		for _ = range time.NewTicker(time.Second * 1).C {
+			call(func(r *C.SDL_Renderer, t *C.SDL_Texture) {
+				cText := C.CString(fmt.Sprintf("%d", nFrames))
 				sur := C.TTF_RenderUTF8_Blended(font, cText, fpsColor)
 				fpsSrc.w = sur.w
 				fpsSrc.h = sur.h
@@ -204,7 +179,52 @@ func main() {
 				fpsTexture = C.SDL_CreateTextureFromSurface(renderer, sur)
 				C.SDL_FreeSurface(sur)
 				C.free(unsafe.Pointer(cText))
-				i = 0
+				nFrames = 0
+			})
+		}
+	}()
+
+	// render
+	go func() {
+		for {
+			frame := <-timedFrames
+			nFrames++
+			call(func(r *C.SDL_Renderer, t *C.SDL_Texture) {
+				C.SDL_UpdateYUVTexture(texture, nil,
+					(*C.Uint8)(unsafe.Pointer(frame.data[0])), frame.linesize[0],
+					(*C.Uint8)(unsafe.Pointer(frame.data[1])), frame.linesize[1],
+					(*C.Uint8)(unsafe.Pointer(frame.data[2])), frame.linesize[2])
+				C.SDL_RenderCopy(renderer, texture, nil, nil)
+				C.SDL_RenderCopy(renderer, fpsTexture, &fpsSrc, &fpsDst)
+				C.SDL_RenderPresent(renderer)
+				decoder.RecycleFrame(frame)
+			})
+		}
+	}()
+
+	// main loop
+	var ev C.SDL_Event
+	args := []reflect.Value{
+		reflect.ValueOf(renderer),
+		reflect.ValueOf(texture),
+	}
+	for {
+		if C.SDL_WaitEvent(&ev) == C.int(0) {
+			fatalSDLError()
+		}
+		switch C.get_event_type(&ev) {
+		case C.SDL_QUIT:
+			os.Exit(0)
+		case C.SDL_KEYDOWN:
+			key := C.get_event_key(&ev)
+			switch key.keysym.sym {
+			case C.SDLK_q:
+				os.Exit(0)
+			}
+		case C.SDL_USEREVENT:
+			if C.get_userevent_code(&ev) == callEventCode {
+				f := *((*reflect.Value)(C.get_event_data1(&ev)))
+				f.Call(args)
 			}
 		}
 	}

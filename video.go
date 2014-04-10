@@ -35,7 +35,6 @@ func NewVideo(filename string) (*Video, error) {
 	// format context
 	var formatContext *C.AVFormatContext
 	if C.avformat_open_input(&formatContext, C.CString(filename), nil, nil) != C.int(0) {
-		log.Fatal("cannot open input")
 		return nil, errors.New(fmt.Sprintf("can't open %d", filename))
 	}
 	if C.avformat_find_stream_info(formatContext, nil) < 0 {
@@ -71,7 +70,6 @@ func NewVideo(filename string) (*Video, error) {
 		if C.avcodec_open2(stream.codec, codec, &options) < 0 {
 			return nil, errors.New(fmt.Sprintf("open codec error %v", stream.codec))
 		}
-		fmt.Printf("%d\n", stream.codec.pix_fmt)
 	}
 
 	return video, nil
