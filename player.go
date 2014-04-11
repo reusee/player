@@ -26,14 +26,6 @@ static inline set_userevent(SDL_Event *ev, SDL_UserEvent ue) {
 	ev->user = ue;
 }
 
-static inline void audio_callback(void *userdata, Uint8 *stream, int len) {
-	provideAudio(userdata, stream, len);
-}
-void setup_audio_callback(SDL_AudioSpec *spec, void *bufferp) {
-	spec->callback = audio_callback;
-	spec->userdata = bufferp;
-}
-
 */
 import "C"
 import (
@@ -59,6 +51,14 @@ type AudioBuf struct {
 }
 
 func main() {
+	defer func() {
+		if e := recover(); e != nil {
+			for {
+				fmt.Printf("")
+			}
+		}
+	}()
+
 	runtime.GOMAXPROCS(32)
 
 	// sdl
@@ -111,30 +111,8 @@ func main() {
 
 	// audio
 	audioBuf := &AudioBuf{Buffer: new(bytes.Buffer)}
-
-	// sdl audio
-	var wantedSpec, spec C.SDL_AudioSpec
 	aCodecCtx := decoder.AudioStreams[0].codec
-	wantedSpec.freq = aCodecCtx.sample_rate
-	switch aCodecCtx.sample_fmt {
-	case C.AV_SAMPLE_FMT_FLTP:
-		wantedSpec.format = C.AUDIO_F32SYS
-	case C.AV_SAMPLE_FMT_S16P:
-		wantedSpec.format = C.AUDIO_S16SYS
-	case C.AV_SAMPLE_FMT_S32:
-		wantedSpec.format = C.AUDIO_S32SYS
-	default:
-		panic("unknown audio sample format")
-	}
-	wantedSpec.channels = C.Uint8(aCodecCtx.channels)
-	wantedSpec.samples = 4096
-	C.setup_audio_callback(&wantedSpec, unsafe.Pointer(audioBuf))
-	dev := C.SDL_OpenAudioDevice(nil, 0, &wantedSpec, &spec, C.SDL_AUDIO_ALLOW_ANY_CHANGE)
-	if dev == 0 {
-		fatalSDLError()
-	}
-	defer C.SDL_CloseAudioDevice(dev)
-	C.SDL_PauseAudioDevice(dev, 0)
+	setupAudioOutput(audioBuf, int(aCodecCtx.sample_rate), int(aCodecCtx.channels), decoder)
 
 	// start decode
 	timedFrames := make(chan *C.AVFrame)

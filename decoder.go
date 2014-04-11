@@ -4,7 +4,8 @@ package main
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libswscale/swscale.h>
-#cgo pkg-config: libavutil libavformat libavcodec libswscale
+#include <libswresample/swresample.h>
+#cgo pkg-config: libavutil libavformat libavcodec libswscale libswresample
 */
 import "C"
 import (
@@ -145,14 +146,26 @@ func (self *Decoder) Start(videoStream, audioStream *C.AVStream,
 			log.Fatal("get scale context failed")
 		}
 
+		// resample context
+		resampleContext := C.swr_alloc_set_opts(nil,
+			C.AV_CH_LAYOUT_STEREO, C.AV_SAMPLE_FMT_FLT, aCodecCtx.sample_rate,
+			C.int64_t(aCodecCtx.channel_layout), aCodecCtx.sample_fmt, aCodecCtx.sample_rate,
+			0, nil)
+		if resampleContext == nil {
+			log.Fatal("get resample context failed")
+		}
+		C.swr_init(resampleContext)
+
 		var packet C.AVPacket
-		var frameFinished, planeSize C.int
+		var frameFinished C.int
 		var pts int64
 		var packetTime time.Duration
 		vFrame := C.av_frame_alloc()
 		aFrame := C.av_frame_alloc()
 		videoIndex := videoStream.index
 		audioIndex := audioStream.index
+		resampleBuffer := (*C.uint8_t)(C.av_malloc(4096 * 8))
+		resampleBufferp := &resampleBuffer
 
 		// decode
 		for self.running {
@@ -216,7 +229,7 @@ func (self *Decoder) Start(videoStream, audioStream *C.AVStream,
 					&vFrame.data[0], &vFrame.linesize[0], 0, vCodecCtx.height,
 					&bufFrame.data[0], &bufFrame.linesize[0]) //TODO bug here
 				bufFrame.pts = C.int64_t(packetTime) // set packet time
-				self.frameChan <- bufFrame        // push to queue
+				self.frameChan <- bufFrame           // push to queue
 
 			} else if packet.stream_index == audioIndex { // decode audio
 			decode_audio_packet:
@@ -228,43 +241,14 @@ func (self *Decoder) Start(videoStream, audioStream *C.AVStream,
 					goto read_packet // frame not complete
 				}
 				if frameFinished > 0 { // frame finished
-					var planePointers []*byte
-					h := (*reflect.SliceHeader)(unsafe.Pointer(&planePointers))
-					h.Len = int(aCodecCtx.channels)
-					h.Cap = h.Len
-					h.Data = uintptr(unsafe.Pointer(aFrame.extended_data))
-					var scalarSize int
-					switch aCodecCtx.sample_fmt {
-					case C.AV_SAMPLE_FMT_FLTP: // planar format
-						scalarSize = 4
-						fallthrough
-					case C.AV_SAMPLE_FMT_S16P:
-						scalarSize = 2
-						C.av_samples_get_buffer_size(&planeSize, aCodecCtx.channels, aFrame.nb_samples,
-							int32(aCodecCtx.sample_fmt), 1)
-						var planes [][]byte
-						for i := 0; i < int(aCodecCtx.channels); i++ {
-							var plane []byte
-							h := (*reflect.SliceHeader)(unsafe.Pointer(&plane))
-							h.Len = int(planeSize)
-							h.Cap = h.Len
-							h.Data = uintptr(unsafe.Pointer(planePointers[i]))
-							planes = append(planes, plane)
-						}
-						audioBuffer.Lock()
-						for i := 0; i < int(planeSize); i += scalarSize {
-							for ch := 0; ch < int(aCodecCtx.channels); ch++ {
-								audioBuffer.Write(planes[ch][i : i+scalarSize])
-							}
-						}
-						audioBuffer.Unlock()
-					case C.AV_SAMPLE_FMT_S32:
-						audioBuffer.Lock()
-						audioBuffer.Write(C.GoBytes(unsafe.Pointer(planePointers[0]), aFrame.linesize[0]))
-						audioBuffer.Unlock()
-					default:
-						panic("unknown audio sample format") //TODO
+					n := C.swr_convert(resampleContext, resampleBufferp, 4096,
+						aFrame.extended_data, aFrame.nb_samples)
+					if n != aFrame.nb_samples {
+						log.Fatal("audio resample failed")
 					}
+					audioBuffer.Lock()
+					audioBuffer.Write(C.GoBytes(unsafe.Pointer(resampleBuffer), n*8))
+					audioBuffer.Unlock()
 				}
 				if l != packet.size { // multiple frame packet
 					packet.size -= l
