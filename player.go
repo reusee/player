@@ -121,6 +121,8 @@ func main() {
 		wantedSpec.format = C.AUDIO_F32SYS
 	case C.AV_SAMPLE_FMT_S16P:
 		wantedSpec.format = C.AUDIO_S16SYS
+	case C.AV_SAMPLE_FMT_S32:
+		wantedSpec.format = C.AUDIO_S32SYS
 	default:
 		panic("unknown audio sample format")
 	}
@@ -131,7 +133,6 @@ func main() {
 	if dev == 0 {
 		fatalSDLError()
 	}
-	fmt.Printf("%v\n%v\n", wantedSpec, spec)
 	defer C.SDL_CloseAudioDevice(dev)
 	C.SDL_PauseAudioDevice(dev, 0)
 
