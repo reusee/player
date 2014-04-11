@@ -99,22 +99,22 @@ func main() {
 	}
 	defer C.TTF_CloseFont(font)
 
-	// open video
-	video, err := NewVideo(os.Args[1])
+	// open decoder
+	decoder, err := NewDecoder(os.Args[1])
 	if err != nil {
 		log.Fatal(err)
 	}
-	if len(video.AudioStreams) == 0 || len(video.VideoStreams) == 0 {
+	if len(decoder.AudioStreams) == 0 || len(decoder.VideoStreams) == 0 {
 		log.Fatal("no video or audio")
 	}
-	defer video.Close()
+	defer decoder.Close()
 
 	// audio
 	audioBuf := &AudioBuf{Buffer: new(bytes.Buffer)}
 
 	// sdl audio
 	var wantedSpec, spec C.SDL_AudioSpec
-	aCodecCtx := video.AudioStreams[0].codec
+	aCodecCtx := decoder.AudioStreams[0].codec
 	wantedSpec.freq = aCodecCtx.sample_rate
 	switch aCodecCtx.sample_fmt {
 	case C.AV_SAMPLE_FMT_FLTP:
@@ -136,13 +136,12 @@ func main() {
 	defer C.SDL_CloseAudioDevice(dev)
 	C.SDL_PauseAudioDevice(dev, 0)
 
-	// decoder
+	// start decode
 	timedFrames := make(chan *C.AVFrame)
-	decoder := video.Decode(video.VideoStreams[0], video.AudioStreams[0],
+	decoder.Start(decoder.VideoStreams[0], decoder.AudioStreams[0],
 		width, height,
 		timedFrames,
 		audioBuf)
-	defer decoder.Close()
 
 	// call closure in sdl thread
 	callEventCode := C.SDL_RegisterEvents(1)
