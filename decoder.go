@@ -227,7 +227,7 @@ func (self *Decoder) Start(videoStream, audioStream *C.AVStream,
 				bufFrame := <-pool        // get frame buffer
 				C.sws_scale(scaleContext, // scale
 					&vFrame.data[0], &vFrame.linesize[0], 0, vCodecCtx.height,
-					&bufFrame.data[0], &bufFrame.linesize[0]) //TODO bug here
+					&bufFrame.data[0], &bufFrame.linesize[0])
 				bufFrame.pts = C.int64_t(packetTime) // set packet time
 				self.frameChan <- bufFrame           // push to queue
 

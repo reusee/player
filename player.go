@@ -51,14 +51,6 @@ type AudioBuf struct {
 }
 
 func main() {
-	defer func() {
-		if e := recover(); e != nil {
-			for {
-				fmt.Printf("")
-			}
-		}
-	}()
-
 	runtime.GOMAXPROCS(32)
 
 	// sdl
