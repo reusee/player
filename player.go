@@ -15,12 +15,6 @@ static inline SDL_KeyboardEvent get_event_key(SDL_Event *ev) {
 static inline Uint32 get_userevent_code(SDL_Event *ev) {
 	return ev->user.code;
 }
-static inline void* get_event_data1(SDL_Event *ev) {
-	return ev->user.data1;
-}
-static inline void* get_event_data2(SDL_Event *ev) {
-	return ev->user.data2;
-}
 static inline set_userevent(SDL_Event *ev, SDL_UserEvent ue) {
 	ev->type = SDL_USEREVENT;
 	ev->user = ue;
@@ -115,13 +109,14 @@ func main() {
 
 	// call closure in sdl thread
 	callEventCode := C.SDL_RegisterEvents(1)
+	callbacks := make(chan func(Env), 1024)
 	call := func(f func(env Env)) {
 		var event C.SDL_Event
 		var userevent C.SDL_UserEvent
 		userevent._type = C.SDL_USEREVENT
 		userevent.code = C.Sint32(callEventCode)
-		userevent.data1 = unsafe.Pointer(&f)
 		C.set_userevent(&event, userevent)
+		callbacks <- f
 		C.SDL_PushEvent(&event)
 	}
 
@@ -194,8 +189,7 @@ func main() {
 			}
 		case C.SDL_USEREVENT:
 			if C.get_userevent_code(&ev) == callEventCode {
-				f := *((*func(Env))(C.get_event_data1(&ev)))
-				f(env)
+				(<-callbacks)(env)
 			}
 		}
 	}
