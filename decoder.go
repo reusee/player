@@ -210,9 +210,10 @@ func (self *Decoder) Start(videoStream, audioStream *C.AVStream,
 				if packetTime < self.seekTarget { // seek again
 					self.seekNext += self.seekStep
 					p("seek again %v\n", self.seekNext)
-				} else { // no further seek
+				} else { // seek ok
 					p("seek ok\n")
 					self.seekTarget = 0
+					self.Timer.Jump(packetTime - self.Timer.Now())
 				}
 			}
 

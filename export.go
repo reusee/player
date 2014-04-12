@@ -7,6 +7,7 @@ import "C"
 import (
 	"io"
 	"reflect"
+	"time"
 	"unsafe"
 )
 
@@ -24,6 +25,6 @@ func pa_callback(input, output unsafe.Pointer, frameCount C.ulong,
 	env.buf.Unlock()
 	curTime := timeInfo.currentTime
 	outputTime := timeInfo.outputBufferDacTime
-	p("%f %f %f\n", curTime, outputTime, outputTime-curTime)
+	p("need audio %v later\n", time.Duration(float64(time.Second)*float64(outputTime-curTime)))
 	return C.paContinue
 }
