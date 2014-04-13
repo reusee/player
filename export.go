@@ -20,9 +20,9 @@ func pa_callback(input, output unsafe.Pointer, frameCount C.ulong,
 	h.Cap = h.Len
 	h.Data = uintptr(output)
 	env := (*paEnv)(data)
-	env.buf.Lock()
-	io.ReadFull(env.buf, s)
-	env.buf.Unlock()
+	env.decoder.audios.Lock()
+	io.ReadFull(env.decoder.audios, s)
+	env.decoder.audios.Unlock()
 	curTime := timeInfo.currentTime
 	outputTime := timeInfo.outputBufferDacTime
 	p("need audio %v later\n", time.Duration(float64(time.Second)*float64(outputTime-curTime)))

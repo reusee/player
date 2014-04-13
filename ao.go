@@ -25,19 +25,17 @@ import (
 )
 
 type paEnv struct {
-	buf     *AudioBuf
 	decoder *Decoder
 	stream  unsafe.Pointer
 }
 
 var env *paEnv
 
-func setupAudioOutput(buf *AudioBuf, rate int, nChannels int, decoder *Decoder) {
+func setupAudioOutput(rate int, nChannels int, decoder *Decoder) {
 	if err := C.Pa_Initialize(); err != C.paNoError {
 		fatalPAError(err)
 	}
 	env = &paEnv{
-		buf:     buf,
 		decoder: decoder,
 	}
 	stream := C.pa_open_stream(C.int(nChannels), C.int(rate), unsafe.Pointer(env))

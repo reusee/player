@@ -9,17 +9,24 @@ package main
 */
 import "C"
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"log"
 	"reflect"
 	"runtime"
+	"sync"
 	"time"
 	"unsafe"
 )
 
 func init() {
 	C.av_register_all()
+}
+
+type AudioBuffer struct {
+	*bytes.Buffer
+	sync.Mutex
 }
 
 type Decoder struct {
@@ -32,13 +39,15 @@ type Decoder struct {
 	openedCodecs  []*C.AVCodecContext
 
 	// decode
-	Timer     *Timer
-	frames    []*C.AVFrame
-	buffers   []*C.uint8_t
-	running   bool
-	frameChan chan *C.AVFrame
-	pool      chan *C.AVFrame
-	duration  time.Duration
+	Timer       *Timer
+	frames      []*C.AVFrame
+	timedFrames chan *C.AVFrame
+	audios      *AudioBuffer
+	buffers     []*C.uint8_t
+	running     bool
+	frameChan   chan *C.AVFrame
+	pool        chan *C.AVFrame
+	duration    time.Duration
 
 	// seek
 	seekTarget time.Duration
@@ -90,6 +99,10 @@ func NewDecoder(filename string) (*Decoder, error) {
 		self.openedCodecs = append(self.openedCodecs, stream.codec)
 	}
 
+	// output channels
+	self.audios = &AudioBuffer{Buffer: new(bytes.Buffer)}
+	self.timedFrames = make(chan *C.AVFrame)
+
 	return self, nil
 }
 
@@ -109,9 +122,7 @@ func (self *Decoder) Close() {
 }
 
 func (self *Decoder) Start(videoStream, audioStream *C.AVStream,
-	scaleWidth, scaleHeight C.int,
-	videoFrameChan chan *C.AVFrame,
-	audioBuffer *AudioBuf) *Decoder {
+	scaleWidth, scaleHeight C.int) *Decoder {
 
 	self.running = true
 	self.Timer = NewTimer()
@@ -247,9 +258,9 @@ func (self *Decoder) Start(videoStream, audioStream *C.AVStream,
 					if n != aFrame.nb_samples {
 						log.Fatal("audio resample failed")
 					}
-					audioBuffer.Lock()
-					audioBuffer.Write(C.GoBytes(unsafe.Pointer(resampleBuffer), n*8))
-					audioBuffer.Unlock()
+					self.audios.Lock()
+					self.audios.Write(C.GoBytes(unsafe.Pointer(resampleBuffer), n*8))
+					self.audios.Unlock()
 				}
 				if l != packet.size { // multiple frame packet
 					packet.size -= l
@@ -281,7 +292,7 @@ func (self *Decoder) Start(videoStream, audioStream *C.AVStream,
 				self.RecycleFrame(frame)
 				continue
 			}
-			videoFrameChan <- frame
+			self.timedFrames <- frame
 		}
 	}()
 

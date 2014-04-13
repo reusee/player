@@ -23,25 +23,18 @@ static inline set_userevent(SDL_Event *ev, SDL_UserEvent ue) {
 */
 import "C"
 import (
-	"bytes"
 	"fmt"
 	"log"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
 	"runtime"
-	"sync"
 	"time"
 	"unsafe"
 )
 
 func init() {
 	go http.ListenAndServe(":55559", nil)
-}
-
-type AudioBuf struct {
-	*bytes.Buffer
-	sync.Mutex
 }
 
 func main() {
@@ -96,16 +89,8 @@ func main() {
 	defer decoder.Close()
 
 	// audio
-	audioBuf := &AudioBuf{Buffer: new(bytes.Buffer)}
 	aCodecCtx := decoder.AudioStreams[0].codec
-	setupAudioOutput(audioBuf, int(aCodecCtx.sample_rate), int(aCodecCtx.channels), decoder)
-
-	// start decode
-	timedFrames := make(chan *C.AVFrame)
-	decoder.Start(decoder.VideoStreams[0], decoder.AudioStreams[0],
-		width, height,
-		timedFrames,
-		audioBuf)
+	setupAudioOutput(int(aCodecCtx.sample_rate), int(aCodecCtx.channels), decoder)
 
 	// call closure in sdl thread
 	callEventCode := C.SDL_RegisterEvents(1)
@@ -150,7 +135,7 @@ func main() {
 	// render
 	go func() {
 		for {
-			frame := <-timedFrames
+			frame := <-decoder.timedFrames
 			nFrames++
 			call(func(env Env) {
 				C.SDL_UpdateYUVTexture(env.texture, nil,
@@ -164,6 +149,9 @@ func main() {
 			})
 		}
 	}()
+
+	// start decode
+	decoder.Start(decoder.VideoStreams[0], decoder.AudioStreams[0], width, height)
 
 	// main loop
 	var ev C.SDL_Event
