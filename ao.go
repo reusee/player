@@ -31,7 +31,7 @@ type paEnv struct {
 
 var env *paEnv
 
-func setupAudioOutput(rate int, nChannels int, decoder *Decoder) {
+func setupAudioOutput(rate int, nChannels int, decoder *Decoder) unsafe.Pointer {
 	if err := C.Pa_Initialize(); err != C.paNoError {
 		fatalPAError(err)
 	}
@@ -43,10 +43,7 @@ func setupAudioOutput(rate int, nChannels int, decoder *Decoder) {
 		log.Fatal("pa open stream")
 	}
 	env.stream = stream
-	err := C.Pa_StartStream(unsafe.Pointer(stream))
-	if err != C.paNoError {
-		fatalPAError(err)
-	}
+	return stream
 }
 
 func fatalPAError(err C.PaError) {

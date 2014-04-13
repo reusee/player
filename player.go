@@ -5,6 +5,7 @@ package main
 #include <SDL.h>
 #include <SDL_ttf.h>
 #cgo pkg-config: sdl2 SDL2_ttf
+#include <portaudio.h>
 
 static inline Uint32 get_event_type(SDL_Event *ev) {
 	return ev->type;
@@ -90,7 +91,7 @@ func main() {
 
 	// audio
 	aCodecCtx := decoder.AudioStreams[0].codec
-	setupAudioOutput(int(aCodecCtx.sample_rate), int(aCodecCtx.channels), decoder)
+	audioStream := setupAudioOutput(int(aCodecCtx.sample_rate), int(aCodecCtx.channels), decoder)
 
 	// call closure in sdl thread
 	callEventCode := C.SDL_RegisterEvents(1)
@@ -152,6 +153,10 @@ func main() {
 
 	// start decode
 	decoder.Start(decoder.VideoStreams[0], decoder.AudioStreams[0], width, height)
+	ret := C.Pa_StartStream(audioStream)
+	if ret != C.paNoError {
+		fatalPAError(ret)
+	}
 
 	// main loop
 	var ev C.SDL_Event

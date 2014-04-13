@@ -9,13 +9,11 @@ package main
 */
 import "C"
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"log"
 	"reflect"
 	"runtime"
-	"sync"
 	"time"
 	"unsafe"
 )
@@ -24,9 +22,9 @@ func init() {
 	C.av_register_all()
 }
 
-type AudioBuffer struct {
-	*bytes.Buffer
-	sync.Mutex
+type AudioFrame struct {
+	time time.Duration
+	data []byte
 }
 
 type Decoder struct {
@@ -37,22 +35,26 @@ type Decoder struct {
 	AudioStreams  []*C.AVStream
 	Codecs        []*C.AVCodec
 	openedCodecs  []*C.AVCodecContext
+	duration      time.Duration
+	Timer         *Timer
+	running       bool
 
-	// decode
-	Timer       *Timer
+	// video
 	frames      []*C.AVFrame
 	timedFrames chan *C.AVFrame
-	audios      *AudioBuffer
 	buffers     []*C.uint8_t
-	running     bool
 	frameChan   chan *C.AVFrame
 	pool        chan *C.AVFrame
-	duration    time.Duration
 
 	// seek
 	seekTarget time.Duration
 	seekStep   time.Duration
 	seekNext   time.Duration
+
+	// audio
+	audioFrames       chan *AudioFrame
+	cachedAudioFrame  *AudioFrame
+	durationPerSample time.Duration
 }
 
 func NewDecoder(filename string) (*Decoder, error) {
@@ -100,7 +102,7 @@ func NewDecoder(filename string) (*Decoder, error) {
 	}
 
 	// output channels
-	self.audios = &AudioBuffer{Buffer: new(bytes.Buffer)}
+	self.audioFrames = make(chan *AudioFrame, 1024)
 	self.timedFrames = make(chan *C.AVFrame)
 
 	return self, nil
@@ -125,10 +127,11 @@ func (self *Decoder) Start(videoStream, audioStream *C.AVStream,
 	scaleWidth, scaleHeight C.int) *Decoder {
 
 	self.running = true
-	self.Timer = NewTimer()
 	self.duration = time.Duration(self.FormatContext.duration * C.AV_TIME_BASE / 1000)
 	vCodecCtx := videoStream.codec
 	aCodecCtx := audioStream.codec
+
+	self.durationPerSample = time.Second / time.Duration(aCodecCtx.sample_rate)
 
 	// frame pool
 	poolSize := 16
@@ -178,6 +181,8 @@ func (self *Decoder) Start(videoStream, audioStream *C.AVStream,
 		resampleBuffer := (*C.uint8_t)(C.av_malloc(4096 * 8))
 		resampleBufferp := &resampleBuffer
 
+		self.Timer = NewTimer()
+
 		// decode
 		for self.running {
 
@@ -214,7 +219,7 @@ func (self *Decoder) Start(videoStream, audioStream *C.AVStream,
 			} else { // ignore packet
 				goto read_packet
 			}
-			p("packet time %v\n", packetTime)
+			p("packet time %v at timer time %v\n", packetTime, self.Timer.Now())
 
 			// check seek
 			if self.seekTarget > 0 && packetTime > 0 { // if packet time cannot determined, skip
@@ -242,6 +247,7 @@ func (self *Decoder) Start(videoStream, audioStream *C.AVStream,
 					&bufFrame.data[0], &bufFrame.linesize[0])
 				bufFrame.pts = C.int64_t(packetTime) // set packet time
 				self.frameChan <- bufFrame           // push to queue
+				p("video frame %v\n", packetTime)
 
 			} else if packet.stream_index == audioIndex { // decode audio
 			decode_audio_packet:
@@ -258,15 +264,17 @@ func (self *Decoder) Start(videoStream, audioStream *C.AVStream,
 					if n != aFrame.nb_samples {
 						log.Fatal("audio resample failed")
 					}
-					self.audios.Lock()
-					self.audios.Write(C.GoBytes(unsafe.Pointer(resampleBuffer), n*8))
-					self.audios.Unlock()
+					self.audioFrames <- &AudioFrame{
+						time: packetTime,
+						data: C.GoBytes(unsafe.Pointer(resampleBuffer), n*8),
+					}
 				}
 				if l != packet.size { // multiple frame packet
 					packet.size -= l
 					packet.data = (*C.uint8_t)(unsafe.Pointer(uintptr(unsafe.Pointer(packet.data)) + uintptr(l)))
 					goto decode_audio_packet
 				}
+				p("audio frame %v\n", packetTime)
 
 			} else { // other stream
 				goto read_packet
@@ -277,10 +285,10 @@ func (self *Decoder) Start(videoStream, audioStream *C.AVStream,
 
 	// sync video
 	go func() {
-		maxDelta := (time.Second / time.Duration(C.av_q2d(videoStream.r_frame_rate)/2))
+		maxDelta := (time.Second / time.Duration(C.av_q2d(videoStream.r_frame_rate)/10))
 		for frame := range self.frameChan {
 			delta := time.Duration(frame.pts) - self.Timer.Now()
-			p("frame %v, delta %v, max delta %v\n", time.Duration(frame.pts), delta, maxDelta)
+			p("video frame %v, delta %v, max delta %v\n", time.Duration(frame.pts), delta, maxDelta)
 			if delta > 0 {
 				if delta > maxDelta {
 					self.Timer.Jump(delta)
